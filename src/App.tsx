@@ -6,7 +6,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 export default function App() {
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('theme');
+      if (saved) return saved === 'dark';
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    } catch (e) {
+      return false;
+    }
+  });
+
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceLang, setSourceLang] = useState('English');
   const [targetLang, setTargetLang] = useState('Urdu');
@@ -16,17 +25,22 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
   const [appLanguage, setAppLanguage] = useState('English');
-  const [apiKeyInput, setApiKeyInput] = useState('');
 
   const imageFileRef = useRef<HTMLInputElement>(null);
   const anyFileRef = useRef<HTMLInputElement>(null);
 
-  // Toggle dark mode class on body
+  // Toggle dark mode class on body and remember preference in localStorage
   useEffect(() => {
-    if (darkMode) {
-      document.body.classList.add('dark');
-    } else {
-      document.body.classList.remove('dark');
+    try {
+      if (darkMode) {
+        document.body.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+      } else {
+        document.body.classList.remove('dark');
+        localStorage.setItem('theme', 'light');
+      }
+    } catch (e) {
+      // Ignore localStorage exceptions in restricted iframe environments
     }
   }, [darkMode]);
 
@@ -73,13 +87,13 @@ export default function App() {
           text: sourceText,
           sourceLang,
           targetLang,
-          model: selectedModel
-        })
+          model: selectedModel,
+        }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({ error: 'Invalid response from translation server.' }));
       if (!res.ok || data.error) {
-        throw new Error(data.error || 'Translation failed');
+        throw new Error(data.error || `Translation failed with status ${res.status}`);
       }
 
       setResultText(data.translatedText);
@@ -96,43 +110,55 @@ export default function App() {
   const handleMic = () => {
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRec) {
-      setStatusMessage('Speech recognition is not supported in this browser.');
+      setStatusMessage('Speech recognition is not supported in this browser. Please try Chrome on Android or desktop.');
       return;
     }
 
-    const recognition = new SpeechRec();
-    const langMap: Record<string, string> = {
-      'Urdu': 'ur-PK',
-      'Punjabi': 'pa-PK',
-      'Hindi': 'hi-IN',
-      'Arabic': 'ar-SA',
-      'French': 'fr-FR',
-      'Spanish': 'es-ES',
-      'English': 'en-US'
-    };
-
-    recognition.lang = langMap[sourceLang] || 'en-US';
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setSourceText(transcript);
-      setStatusMessage('Speech recognized successfully.');
-    };
-
-    recognition.onerror = (event: any) => {
-      setStatusMessage(`Microphone error: ${event.error || 'Permission denied or speech not detected.'}`);
-    };
-
-    recognition.onstart = () => {
-      setStatusMessage('Listening… Speak now.');
-    };
-
     try {
+      const recognition = new SpeechRec();
+      const langMap: Record<string, string> = {
+        'Urdu': 'ur-PK',
+        'Punjabi': 'pa-PK',
+        'Hindi': 'hi-IN',
+        'Arabic': 'ar-SA',
+        'French': 'fr-FR',
+        'Spanish': 'es-ES',
+        'English': 'en-US',
+      };
+
+      recognition.lang = langMap[sourceLang] || 'en-US';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        setStatusMessage('Listening… Speak into your microphone now.');
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results?.[0]?.[0]?.transcript;
+        if (transcript) {
+          setSourceText(transcript);
+          setStatusMessage('Speech recognized successfully.');
+        } else {
+          setStatusMessage('No speech was detected. Please try speaking again.');
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+          setStatusMessage('Microphone permission denied. Please allow microphone access in your browser settings.');
+        } else if (event.error === 'no-speech') {
+          setStatusMessage('No speech was detected. Please try speaking again.');
+        } else if (event.error === 'network') {
+          setStatusMessage('Network error occurred during speech recognition.');
+        } else {
+          setStatusMessage(`Speech error (${event.error || 'unknown'}). Please check microphone permissions.`);
+        }
+      };
+
       recognition.start();
     } catch (e: any) {
-      setStatusMessage(`Could not start microphone: ${e.message}`);
+      setStatusMessage(`Microphone error: ${e.message || 'Could not start recognition.'}`);
     }
   };
 
@@ -159,11 +185,11 @@ export default function App() {
             image: base64String,
             mimeType: file.type,
             targetLang,
-            model: selectedModel
-          })
+            model: selectedModel,
+          }),
         });
 
-        const data = await res.json();
+        const data = await res.json().catch(() => ({ error: 'Invalid response from image analysis server.' }));
         if (!res.ok || data.error) {
           throw new Error(data.error || 'Image analysis failed');
         }
@@ -222,7 +248,7 @@ export default function App() {
       'Arabic': 'ar-SA',
       'French': 'fr-FR',
       'Spanish': 'es-ES',
-      'English': 'en-US'
+      'English': 'en-US',
     };
     utterance.lang = langMap[targetLang] || 'en-US';
     window.speechSynthesis.speak(utterance);
@@ -235,11 +261,11 @@ export default function App() {
       try {
         await navigator.share({
           title: 'Language Translator Pro',
-          text: resultText
+          text: resultText,
         });
         setStatusMessage('Shared successfully.');
       } catch (e) {
-        // user cancelled share
+        // User cancelled share
       }
     } else {
       setStatusMessage('Sharing is not supported in this browser.');
@@ -425,7 +451,7 @@ export default function App() {
           <div className="status" id="status" role="status">{statusMessage}</div>
         </main>
 
-        <div className="footer">Powered by Gemini AI · Cloudflare Pages Ready</div>
+        <div className="footer">Powered by Gemini AI · Translation Workspace</div>
       </div>
 
       <div className={`shade ${settingsOpen ? 'show' : ''}`} id="shade" onClick={(e) => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
@@ -443,37 +469,29 @@ export default function App() {
           </select>
 
           <label className="label">Install App (PWA)</label>
-          <button className="install" id="install" onClick={() => setStatusMessage('To install, add this app to your mobile homescreen or configure a PWA service worker.')}>Install App</button>
+          <button className="install" id="install" onClick={() => setStatusMessage('To install, use "Add to Home screen" in your browser menu.')}>Install App</button>
 
-          <label className="label" htmlFor="api">Gemini API Key</label>
-          <input 
-            id="api" 
-            type="password" 
-            value={apiKeyInput}
-            onChange={(e) => setApiKeyInput(e.target.value)}
-            placeholder="Configured securely via server environment" 
-            autoComplete="off" 
-          />
-          <p className="note">The API key is securely loaded from server-side environment variables (`GEMINI_API_KEY`) and never exposed in the client.</p>
+          <label className="label">Server Security</label>
+          <p className="note">The Gemini API key is securely loaded from Cloudflare Worker secrets (<code>GEMINI_API_KEY</code>) on the server. No secret keys are stored or exposed in the client browser.</p>
 
-          <label className="label">Gemini AI Model Versions</label>
+          <label className="label">Gemini AI Model</label>
           <div className="model-list" id="models">
             <button 
               className={selectedModel === 'gemini-3.8-flash' ? 'active' : ''}
               onClick={() => setSelectedModel('gemini-3.8-flash')}
             >
-              Gemini Flash (3.8) — fast
+              Gemini Flash (3.8) — fast (default)
             </button>
             <button 
               className={selectedModel === 'gemini-1.5-pro' ? 'active' : ''}
               onClick={() => setSelectedModel('gemini-1.5-pro')}
             >
-              Gemini Pro — advanced
+              Gemini Pro (1.5) — advanced
             </button>
           </div>
 
           <label className="label">App Info</label>
-          <div className="note">Language Translator Pro · Cloudflare Pages Deployment Ready</div>
+          <div className="note">Language Translator Pro · Cloudflare Workers</div>
         </aside>
       </div>
     </>

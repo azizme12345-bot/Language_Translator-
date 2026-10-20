@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://language-translator.pages.dev/sitemap.xml
+Sitemap: https://language-translator.azizme12345.workers.dev/sitemap.xml

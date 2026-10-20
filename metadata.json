@@ -1,6 +1,6 @@
 {
   "name": "Language Translator Pro",
-  "description": "Professional multi-language translation workspace powered by Gemini with voice input, image OCR translation, text-to-speech, and Cloudflare Pages deployment support.",
+  "description": "Professional multi-language translation workspace powered by Gemini with voice input, image OCR translation, text-to-speech, and Cloudflare Workers deployment.",
   "requestFramePermissions": [
     "microphone"
   ],
