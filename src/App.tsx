@@ -5,6 +5,40 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 
+// Central Model IDs constant
+export const GEMINI_MODELS = {
+  PRIMARY: 'gemini-1.5-flash',
+  FALLBACK: 'gemini-2.0-flash',
+} as const;
+
+function formatGeminiError(status: number, data: any): string {
+  if (status === 404) {
+    return 'ماڈل ID درست نہیں ہے یا یہ ماڈل اس API ورژن میں دستیاب نہیں ہے۔ (Model Not Found - 404)';
+  }
+  const msg = (data?.error?.message || '').toLowerCase();
+  if (
+    status === 400 ||
+    status === 401 ||
+    msg.includes('api_key_invalid') ||
+    msg.includes('api key not valid') ||
+    msg.includes('invalid api key')
+  ) {
+    return 'Gemini API Key درست نہیں ہے۔ براہِ کرم Settings میں صحیح Key درج کریں۔ (Invalid API Key)';
+  }
+  if (status === 403 || msg.includes('permission') || msg.includes('access denied')) {
+    return 'اس API Key کے پاس اجازت نہیں ہے یا رسائی بند ہے۔ (Permission Denied)';
+  }
+  if (
+    status === 429 ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('quota') ||
+    msg.includes('rate limit')
+  ) {
+    return 'Gemini API کا کوٹہ (Quota) ختم ہو چکا ہے یا ریٹ لمیٹ آ گئی ہے۔ (Quota Exceeded - 429)';
+  }
+  return `Gemini API خرابی (${status || 'ایرر'}): ${data?.error?.message || 'ترجمہ ناکام ہو گیا'}`;
+}
+
 export default function App() {
   const [darkMode, setDarkMode] = useState(() => {
     try {
@@ -23,8 +57,25 @@ export default function App() {
   const [resultText, setResultText] = useState('Translation will appear here…');
   const [statusMessage, setStatusMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
   const [appLanguage, setAppLanguage] = useState('English');
+
+  // Load and persist Gemini API Key in localStorage
+  const [apiKey, setApiKey] = useState(() => {
+    try {
+      return localStorage.getItem('gemini_api_key') || '';
+    } catch (e) {
+      return '';
+    }
+  });
+
+  const handleApiKeyChange = (value: string) => {
+    setApiKey(value);
+    try {
+      localStorage.setItem('gemini_api_key', value);
+    } catch (e) {
+      // Ignore in restricted environments
+    }
+  };
 
   const imageFileRef = useRef<HTMLInputElement>(null);
   const anyFileRef = useRef<HTMLInputElement>(null);
@@ -40,7 +91,7 @@ export default function App() {
         localStorage.setItem('theme', 'light');
       }
     } catch (e) {
-      // Ignore localStorage exceptions in restricted iframe environments
+      // Ignore in restricted environments
     }
   }, [darkMode]);
 
@@ -69,35 +120,94 @@ export default function App() {
     }
   };
 
+  // Helper to send generateContent requests with a specific model
+  const sendGeminiRequest = async (model: string, bodyContent: any) => {
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`;
+    try {
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyContent),
+      });
+      const data = await res.json().catch(() => null);
+      return { ok: res.ok, status: res.status, data };
+    } catch (netErr: any) {
+      return { ok: false, status: 0, data: null, netErr };
+    }
+  };
+
   const handleTranslate = async () => {
     if (!sourceText.trim()) {
       setStatusMessage('Please enter text to translate.');
       return;
     }
 
+    if (!apiKey.trim()) {
+      setStatusMessage('پہلے Settings میں Gemini API Key لکھیں۔');
+      return;
+    }
+
     setIsLoading(true);
-    setStatusMessage('Translating with Gemini...');
+    setStatusMessage('Translating with Gemini 1.5 Flash...');
     setResultText('Translating...');
 
-    try {
-      const res = await fetch('/api/translate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: sourceText,
-          sourceLang,
-          targetLang,
-          model: selectedModel,
-        }),
-      });
+    const prompt = `You are an expert professional translator. Translate the following text accurately from "${sourceLang || 'Auto-detect'}" to "${targetLang}".
+Preserve paragraph breaks, punctuation, formatting, and original meaning. Do not add introductory conversational filler, pleasantries, or explanations. Output ONLY the direct translated text.
 
-      const data = await res.json().catch(() => ({ error: 'Invalid response from translation server.' }));
-      if (!res.ok || data.error) {
-        throw new Error(data.error || `Translation failed with status ${res.status}`);
+Text to translate:
+${sourceText}`;
+
+    const requestBody = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.3 },
+    };
+
+    try {
+      // 1. First attempt with Gemini 1.5 Flash
+      let res = await sendGeminiRequest(GEMINI_MODELS.PRIMARY, requestBody);
+
+      if (res.netErr) {
+        setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
+        setResultText('Translation failed.');
+        setIsLoading(false);
+        return;
       }
 
-      setResultText(data.translatedText);
-      setStatusMessage('Translation completed successfully.');
+      // 2. Check if 1.5 quota is exhausted (HTTP 429 or quota error)
+      const isQuota =
+        res.status === 429 ||
+        (res.data?.error?.message || '').toLowerCase().includes('quota') ||
+        (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
+
+      if (isQuota) {
+        setStatusMessage('1.5 کا کوٹا ختم، 2.0 سے ترجمہ ہو رہا ہے...');
+        // Retry with Gemini 2.0 Flash
+        res = await sendGeminiRequest(GEMINI_MODELS.FALLBACK, requestBody);
+
+        if (res.netErr) {
+          setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
+          setResultText('Translation failed.');
+          setIsLoading(false);
+          return;
+        }
+
+        if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+          setResultText(res.data.candidates[0].content.parts[0].text);
+          setStatusMessage('ترجمہ مکمل ہو گیا (Gemini 2.0 Flash سے)۔');
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      // Check if success
+      if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        setResultText(res.data.candidates[0].content.parts[0].text);
+        setStatusMessage('Translation completed successfully.');
+      } else {
+        const errorMsg = formatGeminiError(res.status, res.data);
+        setStatusMessage(errorMsg);
+        setResultText('Translation failed.');
+      }
     } catch (err: any) {
       console.error(err);
       setStatusMessage(`Error: ${err.message || 'Translation failed.'}`);
@@ -110,7 +220,7 @@ export default function App() {
   const handleMic = () => {
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRec) {
-      setStatusMessage('Speech recognition is not supported in this browser. Please try Chrome on Android or desktop.');
+      setStatusMessage('آپ کے براؤزر میں مائیکروفون (Speech Recognition) کی سہولت موجود نہیں ہے۔ براہِ کرم Google Chrome استعمال کریں۔');
       return;
     }
 
@@ -118,12 +228,12 @@ export default function App() {
       const recognition = new SpeechRec();
       const langMap: Record<string, string> = {
         'Urdu': 'ur-PK',
+        'English': 'en-US',
         'Punjabi': 'pa-PK',
         'Hindi': 'hi-IN',
         'Arabic': 'ar-SA',
         'French': 'fr-FR',
         'Spanish': 'es-ES',
-        'English': 'en-US',
       };
 
       recognition.lang = langMap[sourceLang] || 'en-US';
@@ -131,40 +241,46 @@ export default function App() {
       recognition.maxAlternatives = 1;
 
       recognition.onstart = () => {
-        setStatusMessage('Listening… Speak into your microphone now.');
+        setStatusMessage('سن رہا ہے… مائیکروفون میں بولیے۔');
       };
 
       recognition.onresult = (event: any) => {
         const transcript = event.results?.[0]?.[0]?.transcript;
         if (transcript) {
           setSourceText(transcript);
-          setStatusMessage('Speech recognized successfully.');
+          setStatusMessage('آواز کامیابی سے ٹیکسٹ میں تبدیل ہو گئی۔');
         } else {
-          setStatusMessage('No speech was detected. Please try speaking again.');
+          setStatusMessage('کوئی آواز نہیں سنی گئی۔ دوبارہ کوشش کریں۔');
         }
       };
 
       recognition.onerror = (event: any) => {
         if (event.error === 'not-allowed' || event.error === 'permission-denied') {
-          setStatusMessage('Microphone permission denied. Please allow microphone access in your browser settings.');
+          setStatusMessage('مائیکروفون کی اجازت نہیں ملی۔ براہِ کرم براؤزر میں مائیک کی اجازت (Allow) دیں۔');
         } else if (event.error === 'no-speech') {
-          setStatusMessage('No speech was detected. Please try speaking again.');
+          setStatusMessage('کوئی آواز نہیں سنی گئی۔ دوبارہ بولنے کی کوشش کریں۔');
         } else if (event.error === 'network') {
-          setStatusMessage('Network error occurred during speech recognition.');
+          setStatusMessage('نیٹ ورک کا مسئلہ ہے جس کی وجہ سے آواز کی شناخت نہیں ہو سکی۔');
         } else {
-          setStatusMessage(`Speech error (${event.error || 'unknown'}). Please check microphone permissions.`);
+          setStatusMessage(`مائیکروفون خرابی (${event.error || 'unknown'})۔`);
         }
       };
 
+      // Request mic permission by starting recognition
       recognition.start();
     } catch (e: any) {
-      setStatusMessage(`Microphone error: ${e.message || 'Could not start recognition.'}`);
+      setStatusMessage(`مائیکروفون شروع نہیں ہو سکا: ${e.message || 'Error'}`);
     }
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (!apiKey.trim()) {
+      setStatusMessage('پہلے Settings میں Gemini API Key لکھیں۔');
+      return;
+    }
 
     if (file.size > 10 * 1024 * 1024) {
       setStatusMessage('Image size exceeds 10MB limit.');
@@ -178,24 +294,69 @@ export default function App() {
     reader.onload = async () => {
       try {
         const base64String = (reader.result as string).split(',')[1];
-        const res = await fetch('/api/analyze-image', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            image: base64String,
-            mimeType: file.type,
-            targetLang,
-            model: selectedModel,
-          }),
-        });
+        const prompt = `Analyze this image, extract any readable text present in it, and translate that extracted text into "${targetLang}". If there is no text in the image, provide a concise description of the image content translated into "${targetLang}". Output ONLY the translation or description without conversational commentary.`;
 
-        const data = await res.json().catch(() => ({ error: 'Invalid response from image analysis server.' }));
-        if (!res.ok || data.error) {
-          throw new Error(data.error || 'Image analysis failed');
+        const requestBody = {
+          contents: [
+            {
+              parts: [
+                { text: prompt },
+                {
+                  inline_data: {
+                    mime_type: file.type || 'image/jpeg',
+                    data: base64String,
+                  },
+                },
+              ],
+            },
+          ],
+          generationConfig: { temperature: 0.3 },
+        };
+
+        // 1. First attempt with Gemini 1.5 Flash
+        let res = await sendGeminiRequest(GEMINI_MODELS.PRIMARY, requestBody);
+
+        if (res.netErr) {
+          setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
+          setResultText('Image analysis failed.');
+          setIsLoading(false);
+          return;
         }
 
-        setResultText(data.translatedText);
-        setStatusMessage(`Image analyzed and translated to ${targetLang}.`);
+        // 2. Check if 1.5 quota is exhausted
+        const isQuota =
+          res.status === 429 ||
+          (res.data?.error?.message || '').toLowerCase().includes('quota') ||
+          (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
+
+        if (isQuota) {
+          setStatusMessage('1.5 کا کوٹا ختم، 2.0 سے تجزیہ ہو رہا ہے...');
+          res = await sendGeminiRequest(GEMINI_MODELS.FALLBACK, requestBody);
+
+          if (res.netErr) {
+            setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے۔ (Network error)');
+            setResultText('Image analysis failed.');
+            setIsLoading(false);
+            return;
+          }
+
+          if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+            setResultText(res.data.candidates[0].content.parts[0].text);
+            setStatusMessage(`تصویر کا تجزیہ اور ترجمہ مکمل ہو گیا (Gemini 2.0 Flash سے)۔`);
+            setIsLoading(false);
+            return;
+          }
+        }
+
+        // Check if success
+        if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+          setResultText(res.data.candidates[0].content.parts[0].text);
+          setStatusMessage(`Image analyzed and translated to ${targetLang}.`);
+        } else {
+          const errorMsg = formatGeminiError(res.status, res.data);
+          setStatusMessage(errorMsg);
+          setResultText('Image analysis failed.');
+        }
       } catch (err: any) {
         console.error(err);
         setStatusMessage(`Image analysis error: ${err.message}`);
@@ -471,22 +632,23 @@ export default function App() {
           <label className="label">Install App (PWA)</label>
           <button className="install" id="install" onClick={() => setStatusMessage('To install, use "Add to Home screen" in your browser menu.')}>Install App</button>
 
-          <label className="label">Server Security</label>
-          <p className="note">The Gemini API key is securely loaded from Cloudflare Worker secrets (<code>GEMINI_API_KEY</code>) on the server. No secret keys are stored or exposed in the client browser.</p>
+          <label className="label" htmlFor="api">Gemini API Key</label>
+          <input 
+            id="api" 
+            type="password" 
+            value={apiKey}
+            onChange={(e) => handleApiKeyChange(e.target.value)}
+            placeholder="Enter your Gemini API key" 
+            autoComplete="off" 
+          />
+          <p className="note">آپ کی API Key محفوظ رہے گی اور صرف آپ کے براؤزر کی میموری (localStorage) میں سیو ہوگی۔</p>
 
           <label className="label">Gemini AI Model</label>
           <div className="model-list" id="models">
             <button 
-              className={selectedModel === 'gemini-3.8-flash' ? 'active' : ''}
-              onClick={() => setSelectedModel('gemini-3.8-flash')}
+              className="active"
             >
-              Gemini 3.8 Flash — fast & accurate
-            </button>
-            <button 
-              className={selectedModel === 'gemini-1.5-flash' ? 'active' : ''}
-              onClick={() => setSelectedModel('gemini-1.5-flash')}
-            >
-              Gemini 1.5 Flash — fast
+              Gemini 1.5 Flash (خودکار فال بیک: 2.0 Flash)
             </button>
           </div>
 

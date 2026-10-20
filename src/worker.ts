@@ -11,6 +11,12 @@ export interface Env {
   };
 }
 
+// Central Model IDs constant
+export const GEMINI_MODELS = {
+  PRIMARY: 'gemini-1.5-flash',
+  FALLBACK: 'gemini-2.0-flash',
+} as const;
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -29,6 +35,9 @@ function jsonResponse(data: Record<string, any>, status = 200) {
 
 function parseGeminiError(status: number, data: any): { statusCode: number; message: string } {
   const errMessage = data?.error?.message || 'Unexpected Gemini API response.';
+  if (status === 404) {
+    return { statusCode: 404, message: 'ماڈل ID درست نہیں ہے یا یہ ماڈل دستیاب نہیں ہے۔ (Model Not Found - 404)' };
+  }
   if (status === 400) {
     if (errMessage.includes('API_KEY_INVALID') || errMessage.includes('API key not valid')) {
       return { statusCode: 401, message: 'Invalid Gemini API key. Please verify your GEMINI_API_KEY secret.' };
@@ -61,7 +70,7 @@ export default {
           return jsonResponse({ error: 'Invalid JSON request body.' }, 400);
         }
 
-        const { text, sourceLang, targetLang, model = 'gemini-3.8-flash' } = body;
+        const { text, sourceLang, targetLang, model = GEMINI_MODELS.PRIMARY } = body;
 
         if (!text || typeof text !== 'string' || !text.trim()) {
           return jsonResponse({ error: 'Text to translate is required and cannot be empty.' }, 400);
@@ -71,9 +80,9 @@ export default {
           return jsonResponse({ error: 'Target language is required.' }, 400);
         }
 
-        const apiKey = env.GEMINI_API_KEY;
+        const apiKey = body.apiKey || env.GEMINI_API_KEY;
         if (!apiKey) {
-          return jsonResponse({ error: 'GEMINI_API_KEY is not configured in Cloudflare environment secrets.' }, 500);
+          return jsonResponse({ error: 'GEMINI_API_KEY is not configured in Cloudflare environment secrets or request.' }, 500);
         }
 
         const prompt = `You are an expert professional translator. Translate the following text accurately from "${sourceLang || 'Auto-detect'}" to "${targetLang}".
@@ -82,8 +91,8 @@ Preserve paragraph breaks, punctuation, formatting, and original meaning. Do not
 Text to translate:
 ${text}`;
 
-        const allowedModels = ['gemini-3.8-flash', 'gemini-1.5-flash'];
-        const modelName = allowedModels.includes(model) ? model : 'gemini-3.8-flash';
+        const allowedModels = [GEMINI_MODELS.PRIMARY, GEMINI_MODELS.FALLBACK, 'gemini-3.8-flash'];
+        const modelName = allowedModels.includes(model) ? model : GEMINI_MODELS.PRIMARY;
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
         let response: Response;
@@ -126,21 +135,21 @@ ${text}`;
           return jsonResponse({ error: 'Invalid JSON request body.' }, 400);
         }
 
-        const { image, mimeType, targetLang = 'English', model = 'gemini-3.8-flash' } = body;
+        const { image, mimeType, targetLang = 'English', model = GEMINI_MODELS.PRIMARY } = body;
 
         if (!image || typeof image !== 'string') {
           return jsonResponse({ error: 'Missing or invalid base64 image data.' }, 400);
         }
 
-        const apiKey = env.GEMINI_API_KEY;
+        const apiKey = body.apiKey || env.GEMINI_API_KEY;
         if (!apiKey) {
-          return jsonResponse({ error: 'GEMINI_API_KEY is not configured in Cloudflare environment secrets.' }, 500);
+          return jsonResponse({ error: 'GEMINI_API_KEY is not configured in Cloudflare environment secrets or request.' }, 500);
         }
 
         const prompt = `Analyze this image, extract any readable text present in it, and translate that extracted text into "${targetLang}". If there is no text in the image, provide a concise description of the image content translated into "${targetLang}". Output ONLY the translation or description without conversational commentary.`;
 
-        const allowedModels = ['gemini-3.8-flash', 'gemini-1.5-flash'];
-        const modelName = allowedModels.includes(model) ? model : 'gemini-3.8-flash';
+        const allowedModels = [GEMINI_MODELS.PRIMARY, GEMINI_MODELS.FALLBACK, 'gemini-3.8-flash'];
+        const modelName = allowedModels.includes(model) ? model : GEMINI_MODELS.PRIMARY;
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
         let response: Response;
