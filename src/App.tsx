@@ -11,6 +11,15 @@ export const GEMINI_MODELS = {
   FALLBACK: 'gemini-2.0-flash',
 } as const;
 
+interface HistoryItem {
+  id: string;
+  timestamp: string;
+  sourceLang: string;
+  targetLang: string;
+  sourceText: string;
+  translatedText: string;
+}
+
 function formatGeminiError(status: number, data: any): string {
   if (status === 404) {
     return 'ماڈل ID درست نہیں ہے یا یہ ماڈل اس API ورژن میں دستیاب نہیں ہے۔ (Model Not Found - 404)';
@@ -23,7 +32,7 @@ function formatGeminiError(status: number, data: any): string {
     msg.includes('api key not valid') ||
     msg.includes('invalid api key')
   ) {
-    return 'Gemini API Key درست نہیں ہے۔ براہِ کرم Settings میں صحیح Key درج کریں۔ (Invalid API Key)';
+    return 'Gemini API Key درست نہیں ہے، دوبارہ چیک کریں۔ (Invalid API Key)';
   }
   if (status === 403 || msg.includes('permission') || msg.includes('access denied')) {
     return 'اس API Key کے پاس اجازت نہیں ہے یا رسائی بند ہے۔ (Permission Denied)';
@@ -59,7 +68,16 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [appLanguage, setAppLanguage] = useState('English');
 
-  // Load and persist Gemini API Key in localStorage
+  // Input field state for API Key
+  const [apiKeyInput, setApiKeyInput] = useState(() => {
+    try {
+      return localStorage.getItem('gemini_api_key') || '';
+    } catch (e) {
+      return '';
+    }
+  });
+
+  // Saved & verified active Gemini API Key
   const [apiKey, setApiKey] = useState(() => {
     try {
       return localStorage.getItem('gemini_api_key') || '';
@@ -68,13 +86,120 @@ export default function App() {
     }
   });
 
-  const handleApiKeyChange = (value: string) => {
-    setApiKey(value);
-    try {
-      localStorage.setItem('gemini_api_key', value);
-    } catch (e) {
-      // Ignore in restricted environments
+  const [isVerifyingKey, setIsVerifyingKey] = useState(false);
+  const [apiKeyStatus, setApiKeyStatus] = useState('');
+  const [verifiedModels, setVerifiedModels] = useState<string[]>([]);
+
+  // 1-5: Save button logic with models.list verification
+  const handleSaveApiKey = async () => {
+    const trimmed = apiKeyInput.trim();
+    if (!trimmed) {
+      const msg = 'پہلے API Key لکھیں';
+      setApiKeyStatus(msg);
+      setStatusMessage(msg);
+      return;
     }
+
+    setIsVerifyingKey(true);
+    setApiKeyStatus('API Key کی جانچ ہو رہی ہے...');
+    setStatusMessage('Gemini models.list سے API Key کی جانچ ہو رہی ہے...');
+
+    try {
+      const checkUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${trimmed}`;
+      const res = await fetch(checkUrl);
+      const data = await res.json().catch(() => null);
+
+      if (res.ok && data && Array.isArray(data.models)) {
+        // Success: valid key
+        try {
+          localStorage.setItem('gemini_api_key', trimmed);
+        } catch (e) {}
+        setApiKey(trimmed);
+
+        const genModels = data.models
+          .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+          .map((m: any) => m.name.replace(/^models\//, ''));
+
+        setVerifiedModels(genModels);
+
+        const successMsg = 'API Key کامیابی سے محفوظ ہو گئی';
+        setApiKeyStatus(successMsg);
+        setStatusMessage(successMsg);
+      } else {
+        // Invalid key
+        const failMsg = 'API Key درست نہیں ہے، دوبارہ چیک کریں';
+        setApiKeyStatus(failMsg);
+        setStatusMessage(failMsg);
+      }
+    } catch (err: any) {
+      const netMsg = 'انٹرنیٹ کنکشن کا مسئلہ ہے، دوبارہ چیک کریں۔';
+      setApiKeyStatus(netMsg);
+      setStatusMessage(netMsg);
+    } finally {
+      setIsVerifyingKey(false);
+    }
+  };
+
+  // Get prioritized list of candidate models supporting generateContent
+  const getCandidateModels = () => {
+    const defaultPriority = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3.8-flash'];
+    if (verifiedModels.length > 0) {
+      const matched = defaultPriority.filter((m) => verifiedModels.includes(m));
+      const remaining = verifiedModels.filter((m) => !defaultPriority.includes(m));
+      const combined = [...matched, ...remaining];
+      return combined.length > 0 ? combined : defaultPriority;
+    }
+    return defaultPriority;
+  };
+
+  // Load and persist translation history in localStorage (max 20 items)
+  const [history, setHistory] = useState<HistoryItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('translation_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const saveToHistory = (sText: string, tText: string, sLang: string, tLang: string) => {
+    try {
+      const newItem: HistoryItem = {
+        id: Date.now().toString(),
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        sourceLang: sLang,
+        targetLang: tLang,
+        sourceText: sText,
+        translatedText: tText,
+      };
+      setHistory((prev) => {
+        const filtered = prev.filter(
+          (item) => item.sourceText !== sText || item.targetLang !== tLang
+        );
+        const updated = [newItem, ...filtered].slice(0, 20);
+        try {
+          localStorage.setItem('translation_history', JSON.stringify(updated));
+        } catch (e) {}
+        return updated;
+      });
+    } catch (e) {}
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    try {
+      localStorage.removeItem('translation_history');
+    } catch (e) {}
+    setStatusMessage('ترجمے کی تاریخ صاف کر دی گئی ہے۔');
+  };
+
+  const restoreHistoryItem = (item: HistoryItem) => {
+    setSourceLang(item.sourceLang);
+    setTargetLang(item.targetLang);
+    setSourceText(item.sourceText);
+    setResultText(item.translatedText);
+    setStatusMessage(`تاریخ سے ترجمہ لوڈ کر دیا گیا (${item.sourceLang} ➔ ${item.targetLang})`);
+    setSettingsOpen(false);
   };
 
   const imageFileRef = useRef<HTMLInputElement>(null);
@@ -136,6 +261,7 @@ export default function App() {
     }
   };
 
+  // 6: Translation request with candidate model sequence and 404/429 handling
   const handleTranslate = async () => {
     if (!sourceText.trim()) {
       setStatusMessage('Please enter text to translate.');
@@ -143,12 +269,12 @@ export default function App() {
     }
 
     if (!apiKey.trim()) {
-      setStatusMessage('پہلے Settings میں Gemini API Key لکھیں۔');
+      setStatusMessage('پہلے API Key لکھیں');
       return;
     }
 
     setIsLoading(true);
-    setStatusMessage('Translating with Gemini 1.5 Flash...');
+    setStatusMessage('ترجمہ شروع ہو رہا ہے...');
     setResultText('Translating...');
 
     const prompt = `You are an expert professional translator. Translate the following text accurately from "${sourceLang || 'Auto-detect'}" to "${targetLang}".
@@ -162,52 +288,54 @@ ${sourceText}`;
       generationConfig: { temperature: 0.3 },
     };
 
+    const candidateModels = getCandidateModels();
+    let lastError = '';
+
     try {
-      // 1. First attempt with Gemini 1.5 Flash
-      let res = await sendGeminiRequest(GEMINI_MODELS.PRIMARY, requestBody);
+      for (let i = 0; i < candidateModels.length; i++) {
+        const currentModel = candidateModels[i];
+        setStatusMessage(`ماڈل ${currentModel} سے رابطہ ہو رہا ہے...`);
 
-      if (res.netErr) {
-        setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
-        setResultText('Translation failed.');
-        setIsLoading(false);
-        return;
-      }
-
-      // 2. Check if 1.5 quota is exhausted (HTTP 429 or quota error)
-      const isQuota =
-        res.status === 429 ||
-        (res.data?.error?.message || '').toLowerCase().includes('quota') ||
-        (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
-
-      if (isQuota) {
-        setStatusMessage('1.5 کا کوٹا ختم، 2.0 سے ترجمہ ہو رہا ہے...');
-        // Retry with Gemini 2.0 Flash
-        res = await sendGeminiRequest(GEMINI_MODELS.FALLBACK, requestBody);
+        const res = await sendGeminiRequest(currentModel, requestBody);
 
         if (res.netErr) {
-          setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
+          setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
           setResultText('Translation failed.');
           setIsLoading(false);
           return;
         }
 
         if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-          setResultText(res.data.candidates[0].content.parts[0].text);
-          setStatusMessage('ترجمہ مکمل ہو گیا (Gemini 2.0 Flash سے)۔');
+          const translated = res.data.candidates[0].content.parts[0].text;
+          setResultText(translated);
+          saveToHistory(sourceText, translated, sourceLang, targetLang);
+          setStatusMessage(`ترجمہ مکمل ہو گیا (ماڈل: ${currentModel} استعمال ہوا)۔`);
           setIsLoading(false);
           return;
         }
+
+        const is404 = res.status === 404;
+        const isQuota =
+          res.status === 429 ||
+          (res.data?.error?.message || '').toLowerCase().includes('quota') ||
+          (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
+
+        if ((is404 || isQuota) && i < candidateModels.length - 1) {
+          const nextModel = candidateModels[i + 1];
+          if (is404) {
+            setStatusMessage(`ماڈل ${currentModel} نہیں ملا (404)، اب ${nextModel} سے کوشش ہو رہی ہے...`);
+          } else {
+            setStatusMessage(`ماڈل ${currentModel} کا کوٹا ختم، اب ${nextModel} سے کوشش ہو رہی ہے...`);
+          }
+          continue;
+        }
+
+        lastError = formatGeminiError(res.status, res.data);
+        break;
       }
 
-      // Check if success
-      if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-        setResultText(res.data.candidates[0].content.parts[0].text);
-        setStatusMessage('Translation completed successfully.');
-      } else {
-        const errorMsg = formatGeminiError(res.status, res.data);
-        setStatusMessage(errorMsg);
-        setResultText('Translation failed.');
-      }
+      setStatusMessage(lastError || 'ترجمہ ناکام ہو گیا۔');
+      setResultText('Translation failed.');
     } catch (err: any) {
       console.error(err);
       setStatusMessage(`Error: ${err.message || 'Translation failed.'}`);
@@ -246,27 +374,28 @@ ${sourceText}`;
 
       recognition.onresult = (event: any) => {
         const transcript = event.results?.[0]?.[0]?.transcript;
-        if (transcript) {
+        if (transcript && transcript.trim()) {
           setSourceText(transcript);
           setStatusMessage('آواز کامیابی سے ٹیکسٹ میں تبدیل ہو گئی۔');
         } else {
-          setStatusMessage('کوئی آواز نہیں سنی گئی۔ دوبارہ کوشش کریں۔');
+          setStatusMessage('کوئی آواز نہیں پکڑی گئی۔ براہِ کرم دوبارہ بولنے کی کوشش کریں۔');
         }
       };
 
       recognition.onerror = (event: any) => {
         if (event.error === 'not-allowed' || event.error === 'permission-denied') {
-          setStatusMessage('مائیکروفون کی اجازت نہیں ملی۔ براہِ کرم براؤزر میں مائیک کی اجازت (Allow) دیں۔');
+          setStatusMessage('مائیکروفون کی اجازت نہیں ملی۔ براہِ کرم براؤزر سیٹنگز میں مائیک کی اجازت (Allow) دیں۔');
         } else if (event.error === 'no-speech') {
-          setStatusMessage('کوئی آواز نہیں سنی گئی۔ دوبارہ بولنے کی کوشش کریں۔');
+          setStatusMessage('کوئی آواز نہیں پکڑی گئی۔ براہِ کرم دوبارہ بولنے کی کوشش کریں۔');
         } else if (event.error === 'network') {
           setStatusMessage('نیٹ ورک کا مسئلہ ہے جس کی وجہ سے آواز کی شناخت نہیں ہو سکی۔');
+        } else if (event.error === 'audio-capture') {
+          setStatusMessage('مائیکروفون ہارڈویئر نہیں ملا یا مائیک بند ہے۔');
         } else {
-          setStatusMessage(`مائیکروفون خرابی (${event.error || 'unknown'})۔`);
+          setStatusMessage(`مائیکروفون خرابی (${event.error || 'نامعلوم'})۔`);
         }
       };
 
-      // Request mic permission by starting recognition
       recognition.start();
     } catch (e: any) {
       setStatusMessage(`مائیکروفون شروع نہیں ہو سکا: ${e.message || 'Error'}`);
@@ -278,7 +407,7 @@ ${sourceText}`;
     if (!file) return;
 
     if (!apiKey.trim()) {
-      setStatusMessage('پہلے Settings میں Gemini API Key لکھیں۔');
+      setStatusMessage('پہلے API Key لکھیں');
       return;
     }
 
@@ -313,50 +442,53 @@ ${sourceText}`;
           generationConfig: { temperature: 0.3 },
         };
 
-        // 1. First attempt with Gemini 1.5 Flash
-        let res = await sendGeminiRequest(GEMINI_MODELS.PRIMARY, requestBody);
+        const candidateModels = getCandidateModels();
+        let lastError = '';
 
-        if (res.netErr) {
-          setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
-          setResultText('Image analysis failed.');
-          setIsLoading(false);
-          return;
-        }
+        for (let i = 0; i < candidateModels.length; i++) {
+          const currentModel = candidateModels[i];
+          setStatusMessage(`ماڈل ${currentModel} سے تجزیہ ہو رہا ہے...`);
 
-        // 2. Check if 1.5 quota is exhausted
-        const isQuota =
-          res.status === 429 ||
-          (res.data?.error?.message || '').toLowerCase().includes('quota') ||
-          (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
-
-        if (isQuota) {
-          setStatusMessage('1.5 کا کوٹا ختم، 2.0 سے تجزیہ ہو رہا ہے...');
-          res = await sendGeminiRequest(GEMINI_MODELS.FALLBACK, requestBody);
+          const res = await sendGeminiRequest(currentModel, requestBody);
 
           if (res.netErr) {
-            setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے۔ (Network error)');
+            setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ (Network error)');
             setResultText('Image analysis failed.');
             setIsLoading(false);
             return;
           }
 
           if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-            setResultText(res.data.candidates[0].content.parts[0].text);
-            setStatusMessage(`تصویر کا تجزیہ اور ترجمہ مکمل ہو گیا (Gemini 2.0 Flash سے)۔`);
+            const translated = res.data.candidates[0].content.parts[0].text;
+            setResultText(translated);
+            saveToHistory(`[Image: ${file.name}]`, translated, sourceLang, targetLang);
+            setStatusMessage(`تصویر کا تجزیہ مکمل ہو گیا (ماڈل: ${currentModel} استعمال ہوا)۔`);
             setIsLoading(false);
             return;
           }
+
+          const is404 = res.status === 404;
+          const isQuota =
+            res.status === 429 ||
+            (res.data?.error?.message || '').toLowerCase().includes('quota') ||
+            (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
+
+          if ((is404 || isQuota) && i < candidateModels.length - 1) {
+            const nextModel = candidateModels[i + 1];
+            if (is404) {
+              setStatusMessage(`ماڈل ${currentModel} نہیں ملا (404)، اب ${nextModel} سے کوشش ہو رہی ہے...`);
+            } else {
+              setStatusMessage(`ماڈل ${currentModel} کا کوٹا ختم، اب ${nextModel} سے کوشش ہو رہی ہے...`);
+            }
+            continue;
+          }
+
+          lastError = formatGeminiError(res.status, res.data);
+          break;
         }
 
-        // Check if success
-        if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-          setResultText(res.data.candidates[0].content.parts[0].text);
-          setStatusMessage(`Image analyzed and translated to ${targetLang}.`);
-        } else {
-          const errorMsg = formatGeminiError(res.status, res.data);
-          setStatusMessage(errorMsg);
-          setResultText('Image analysis failed.');
-        }
+        setStatusMessage(lastError || 'تصویر کا تجزیہ ناکام ہو گیا۔');
+        setResultText('Image analysis failed.');
       } catch (err: any) {
         console.error(err);
         setStatusMessage(`Image analysis error: ${err.message}`);
@@ -633,15 +765,49 @@ ${sourceText}`;
           <button className="install" id="install" onClick={() => setStatusMessage('To install, use "Add to Home screen" in your browser menu.')}>Install App</button>
 
           <label className="label" htmlFor="api">Gemini API Key</label>
-          <input 
-            id="api" 
-            type="password" 
-            value={apiKey}
-            onChange={(e) => handleApiKeyChange(e.target.value)}
-            placeholder="Enter your Gemini API key" 
-            autoComplete="off" 
-          />
-          <p className="note">آپ کی API Key محفوظ رہے گی اور صرف آپ کے براؤزر کی میموری (localStorage) میں سیو ہوگی۔</p>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '6px' }}>
+            <input 
+              id="api" 
+              type="password" 
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+              placeholder="Enter your Gemini API key" 
+              autoComplete="off" 
+              style={{ flex: 1 }}
+            />
+            <button 
+              id="saveApiKey"
+              onClick={handleSaveApiKey}
+              disabled={isVerifyingKey}
+              style={{
+                padding: '0 16px',
+                borderRadius: '11px',
+                border: '0',
+                background: 'var(--green)',
+                color: '#fff',
+                fontWeight: 700,
+                fontSize: '13px',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+                minHeight: '42px',
+              }}
+            >
+              {isVerifyingKey ? 'جانچ...' : 'Save'}
+            </button>
+          </div>
+          <p
+            className="note"
+            style={{
+              color:
+                apiKeyStatus.includes('درست نہیں') || apiKeyStatus.includes('پہلے')
+                  ? '#e53e3e'
+                  : apiKeyStatus.includes('محفوظ')
+                  ? 'var(--green)'
+                  : 'var(--muted)',
+            }}
+          >
+            {apiKeyStatus || 'API Key لکھ کر Save کا بٹن دبائیں۔ یہ براہِ راست models.list سے تصدیق ہوگی۔'}
+          </p>
 
           <label className="label">Gemini AI Model</label>
           <div className="model-list" id="models">
@@ -651,6 +817,56 @@ ${sourceText}`;
               Gemini 1.5 Flash (خودکار فال بیک: 2.0 Flash)
             </button>
           </div>
+
+          <label className="label">Translation History (تاریخ)</label>
+          {history.length === 0 ? (
+            <p className="note">کوئی ترجمہ محفوظ نہیں ہے۔</p>
+          ) : (
+            <div style={{ display: 'grid', gap: '7px', maxHeight: '180px', overflowY: 'auto', marginBottom: '8px' }}>
+              {history.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => restoreHistoryItem(item)}
+                  style={{
+                    textAlign: 'left',
+                    padding: '8px 10px',
+                    border: '1px solid var(--edge)',
+                    borderRadius: '10px',
+                    background: 'transparent',
+                    color: 'var(--ink)',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--muted)', fontSize: '11px', marginBottom: '3px' }}>
+                    <span>{item.sourceLang} ➔ {item.targetLang}</span>
+                    <span>{item.timestamp}</span>
+                  </div>
+                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                    {item.sourceText}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          {history.length > 0 && (
+            <button
+              onClick={clearHistory}
+              style={{
+                width: '100%',
+                padding: '8px',
+                border: '1px solid var(--edge)',
+                borderRadius: '10px',
+                background: 'transparent',
+                color: 'var(--muted)',
+                fontSize: '12px',
+                cursor: 'pointer',
+                marginTop: '4px',
+              }}
+            >
+              History صاف کریں
+            </button>
+          )}
 
           <label className="label">App Info</label>
           <div className="note">Language Translator Pro · Cloudflare Workers</div>
