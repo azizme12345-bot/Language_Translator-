@@ -42,7 +42,8 @@ Preserve paragraph breaks, punctuation, formatting, and original meaning. Do not
 Text to translate:
 ${text}`;
 
-                const modelName = model?.includes('pro') ? 'gemini-1.5-pro' : 'gemini-3.8-flash';
+                const allowedModels = ['gemini-3.8-flash', 'gemini-1.5-flash'];
+                const modelName = allowedModels.includes(model) ? model : 'gemini-3.8-flash';
                 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
                 const geminiRes = await fetch(apiUrl, {
@@ -77,7 +78,8 @@ ${text}`;
 
                 const prompt = `Analyze this image, extract any readable text present in it, and translate that extracted text into "${targetLang}". If there is no text in the image, provide a concise description of the image content translated into "${targetLang}". Output ONLY the translation or description without conversational commentary.`;
 
-                const modelName = model?.includes('pro') ? 'gemini-1.5-pro' : 'gemini-3.8-flash';
+                const allowedModels = ['gemini-3.8-flash', 'gemini-1.5-flash'];
+                const modelName = allowedModels.includes(model) ? model : 'gemini-3.8-flash';
                 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
                 const geminiRes = await fetch(apiUrl, {

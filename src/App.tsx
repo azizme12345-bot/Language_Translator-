@@ -480,13 +480,13 @@ export default function App() {
               className={selectedModel === 'gemini-3.8-flash' ? 'active' : ''}
               onClick={() => setSelectedModel('gemini-3.8-flash')}
             >
-              Gemini Flash (3.8) — fast (default)
+              Gemini 3.8 Flash — fast & accurate
             </button>
             <button 
-              className={selectedModel === 'gemini-1.5-pro' ? 'active' : ''}
-              onClick={() => setSelectedModel('gemini-1.5-pro')}
+              className={selectedModel === 'gemini-1.5-flash' ? 'active' : ''}
+              onClick={() => setSelectedModel('gemini-1.5-flash')}
             >
-              Gemini Pro (1.5) — advanced
+              Gemini 1.5 Flash — fast
             </button>
           </div>
 

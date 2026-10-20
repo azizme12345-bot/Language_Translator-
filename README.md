@@ -46,4 +46,4 @@ In local dev, Vite handles the `/api/translate` and `/api/analyze-image` routes 
 ```bash
 npm run build
 ```
-This generates static assets in `dist/` and copies `public/_worker.js` to `dist/_worker.js`.
+This compiles the static web assets into the `./dist` directory for Cloudflare Workers static asset serving (`env.ASSETS`).
