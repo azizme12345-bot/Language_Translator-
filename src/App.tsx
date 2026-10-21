@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
-import { startSpeechRecognition } from './mic';
+import React, { useState, useEffect, useRef } from 'react';
+import { startSpeechRecognition } from './mic.web.api';
+import { speakText, stopSpeaking, isSpeaking } from './tts';
 import {
   openImagePicker,
   openDocumentOrFilePicker,
@@ -12,11 +13,7 @@ import {
   fileToText,
 } from './camera';
 
-// Central Model IDs constant
-export const GEMINI_MODELS = {
-  PRIMARY: 'gemini-1.5-flash',
-  FALLBACK: 'gemini-2.0-flash',
-} as const;
+import { MODEL_ID_1_5, MODEL_ID_2_0, DEFAULT_MODEL_ID } from './config';
 
 interface HistoryItem {
   id: string;
@@ -31,7 +28,7 @@ type SettingsView = 'main' | 'spray' | 'help' | 'history' | 'language';
 
 function formatGeminiError(status: number, data: any): string {
   if (status === 404) {
-    return 'ماڈل ID درست نہیں ہے یا یہ ماڈل اس API ورژن میں دستیاب نہیں ہے۔ (Model Not Found - 404)';
+    return `ماڈل ID درست نہیں ہے یا یہ ماڈل اس API ورژن میں دستیاب نہیں ہے۔ (Model Not Found - 404)`;
   }
   const msg = (data?.error?.message || '').toLowerCase();
   if (
@@ -78,6 +75,8 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const recognitionControllerRef = useRef<{ stop: () => void } | null>(null);
   const [appLanguage, setAppLanguage] = useState('English');
 
   // Spray (Audio / Speech / Spray effects) custom settings
@@ -273,22 +272,9 @@ export default function App() {
     }
   };
 
-  // Get prioritized list of candidate models supporting generateContent
-  const getCandidateModels = () => {
-    const defaultPriority = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3.8-flash'];
-    if (verifiedModels.length > 0) {
-      const matched = defaultPriority.filter((m) => verifiedModels.includes(m));
-      const remaining = verifiedModels.filter((m) => !defaultPriority.includes(m));
-      const combined = [...matched, ...remaining];
-      return combined.length > 0 ? combined : defaultPriority;
-    }
-    return defaultPriority;
-  };
-
   const handleSwap = () => {
     const temp = sourceLang;
     setSourceLang(targetLang);
-    setTargetLang(temp);
     setSourceText(resultText !== 'Translation will appear here…' ? resultText : '');
     setResultText('Translation will appear here…');
     setStatusMessage('');
@@ -310,7 +296,7 @@ export default function App() {
     }
   };
 
-  // Helper to send generateContent requests with a specific model
+  // Helper to send generateContent requests with the verified MODEL_ID
   const sendGeminiRequest = async (model: string, bodyContent: any) => {
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`;
     try {
@@ -326,7 +312,7 @@ export default function App() {
     }
   };
 
-  // Translation request with candidate model sequence and 404/429 handling
+  // Translation request using verified MODEL_ID directly with clear error handling
   const handleTranslate = async () => {
     if (!sourceText.trim()) {
       setStatusMessage('Please enter text to translate.');
@@ -339,7 +325,7 @@ export default function App() {
     }
 
     setIsLoading(true);
-    setStatusMessage('ترجمہ شروع ہو رہا ہے...');
+    setStatusMessage(`ماڈل سے رابطہ ہو رہا ہے...`);
     setResultText('Translating...');
 
     const prompt = `You are an expert professional translator. Translate the following text accurately from "${sourceLang || 'Auto-detect'}" to "${targetLang}".
@@ -353,58 +339,36 @@ ${sourceText}`;
       generationConfig: { temperature: 0.3 },
     };
 
-    const candidateModels = getCandidateModels();
-    let lastError = '';
-
     try {
-      for (let i = 0; i < candidateModels.length; i++) {
-        const currentModel = candidateModels[i];
-        setStatusMessage(`ماڈل ${currentModel} سے رابطہ ہو رہا ہے...`);
-
-        const res = await sendGeminiRequest(currentModel, requestBody);
-
-        if (res.netErr) {
-          setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
-          setResultText('Translation failed.');
-          setIsLoading(false);
-          return;
-        }
-
-        if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-          const translated = res.data.candidates[0].content.parts[0].text;
-          setResultText(translated);
-          saveToHistory(sourceText, translated, sourceLang, targetLang);
-          setStatusMessage(`ترجمہ مکمل ہو گیا (ماڈل: ${currentModel} استعمال ہوا)۔`);
-          setIsLoading(false);
-
-          // If Spray auto-pronounce is enabled, speak out
-          if (sprayAutoPronounce && 'speechSynthesis' in window) {
-            triggerSpeech(translated, targetLang);
-          }
-          return;
-        }
-
-        const is404 = res.status === 404;
-        const isQuota =
-          res.status === 429 ||
-          (res.data?.error?.message || '').toLowerCase().includes('quota') ||
-          (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
-
-        if ((is404 || isQuota) && i < candidateModels.length - 1) {
-          const nextModel = candidateModels[i + 1];
-          if (is404) {
-            setStatusMessage(`ماڈل ${currentModel} نہیں ملا (404)، اب ${nextModel} سے کوشش ہو رہی ہے...`);
-          } else {
-            setStatusMessage(`ماڈل ${currentModel} کا کوٹا ختم، اب ${nextModel} سے کوشش ہو رہی ہے...`);
-          }
-          continue;
-        }
-
-        lastError = formatGeminiError(res.status, res.data);
-        break;
+      let res = await sendGeminiRequest(MODEL_ID_1_5, requestBody);
+      if (res.status === 404) {
+          res = await sendGeminiRequest(MODEL_ID_2_0, requestBody);
+          setStatusMessage("1.5 کا کوٹا ختم، 2.0 سے ترجمہ ہو رہا ہے");
       }
 
-      setStatusMessage(lastError || 'ترجمہ ناکام ہو گیا۔');
+      if (res.netErr) {
+        setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ براہِ کرم اپنا کنکشن چیک کریں۔ (Network error)');
+        setResultText('Translation failed.');
+        setIsLoading(false);
+        return;
+      }
+
+      if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        const translated = res.data.candidates[0].content.parts[0].text;
+        setResultText(translated);
+        saveToHistory(sourceText, translated, sourceLang, targetLang);
+        setStatusMessage(`ترجمہ مکمل ہو گیا`);
+        setIsLoading(false);
+
+        // If Spray auto-pronounce is enabled, speak out
+        if (sprayAutoPronounce) {
+          triggerSpeech(translated, targetLang);
+        }
+        return;
+      }
+
+      const errorMsg = formatGeminiError(res.status, res.data);
+      setStatusMessage(errorMsg);
       setResultText('Translation failed.');
     } catch (err: any) {
       console.error(err);
@@ -417,27 +381,47 @@ ${sourceText}`;
 
   // 1. Microphone feature implemented via separate mic module
   const handleMic = () => {
-    if (isListening) return;
+    // If currently listening, tapping mic STOPS recording immediately
+    if (isListening) {
+      if (recognitionControllerRef.current) {
+        try {
+          recognitionControllerRef.current.stop();
+        } catch (e) {}
+        recognitionControllerRef.current = null;
+      }
+      setIsListening(false);
+      setStatusMessage('مائیک بند کر دیا گیا۔ (Mic stopped)');
+      return;
+    }
 
-    setStatusMessage('سن رہا ہے… مائیکروفون میں واضح آواز میں بولیے۔');
-    setIsListening(true);
+    // Stop TTS audio if currently speaking
+    stopSpeaking();
+    setIsPlayingAudio(false);
 
-    startSpeechRecognition(sourceLang, {
+    setStatusMessage('سن رہا ہے… مائیکروفون میں بولیے۔');
+    console.log('handleMic called, starting recognition...');
+
+    const controller = startSpeechRecognition(sourceLang, {
       onStart: () => {
         setIsListening(true);
         setStatusMessage('سن رہا ہے… مائیکروفون میں بولیے۔');
       },
       onResult: (transcript: string) => {
         setSourceText(transcript);
-        setStatusMessage('آواز کامیابی سے ٹیکسٹ میں تبدیل ہو گئی۔');
+        setStatusMessage('آواز وصول ہو گئی: ' + (transcript.length > 35 ? transcript.slice(0, 35) + '…' : transcript));
       },
       onError: (errorMsg: string) => {
         setStatusMessage(errorMsg);
+        setIsListening(false);
+        recognitionControllerRef.current = null;
       },
       onEnd: () => {
         setIsListening(false);
+        recognitionControllerRef.current = null;
       },
     });
+
+    recognitionControllerRef.current = controller;
   };
 
   // 2. Camera / Image feature implemented via separate camera module
@@ -473,14 +457,10 @@ ${sourceText}`;
             generationConfig: { temperature: 0.3 },
           };
 
-          const candidateModels = getCandidateModels();
-          let lastError = '';
+          setStatusMessage(`ماڈل ${DEFAULT_MODEL_ID} سے تصویر کا تجزیہ شروع ہو رہا ہے...`);
 
-          for (let i = 0; i < candidateModels.length; i++) {
-            const currentModel = candidateModels[i];
-            setStatusMessage(`ماڈل ${currentModel} سے تجزیہ ہو رہا ہے...`);
-
-            const res = await sendGeminiRequest(currentModel, requestBody);
+          try {
+            const res = await sendGeminiRequest(DEFAULT_MODEL_ID, requestBody);
 
             if (res.netErr) {
               setStatusMessage('انٹرنیٹ کنکشن کا مسئلہ ہے یا نیٹ ورک ایرر ہے۔ (Network error)');
@@ -493,32 +473,18 @@ ${sourceText}`;
               const translated = res.data.candidates[0].content.parts[0].text;
               setResultText(translated);
               saveToHistory(`[Image: ${file.name}]`, translated, sourceLang, targetLang);
-              setStatusMessage(`تصویر کا تجزیہ مکمل ہو گیا (ماڈل: ${currentModel} استعمال ہوا)۔`);
+              setStatusMessage(`تصویر کا تجزیہ مکمل ہو گیا (ماڈل: ${DEFAULT_MODEL_ID} استعمال ہوا)۔`);
               setIsLoading(false);
               return;
             }
 
-            const is404 = res.status === 404;
-            const isQuota =
-              res.status === 429 ||
-              (res.data?.error?.message || '').toLowerCase().includes('quota') ||
-              (res.data?.error?.message || '').toLowerCase().includes('resource_exhausted');
-
-            if ((is404 || isQuota) && i < candidateModels.length - 1) {
-              const nextModel = candidateModels[i + 1];
-              if (is404) {
-                setStatusMessage(`ماڈل ${currentModel} نہیں ملا (404)، اب ${nextModel} سے کوشش ہو رہی ہے...`);
-              } else {
-                setStatusMessage(`ماڈل ${currentModel} کا کوٹا ختم، اب ${nextModel} سے کوشش ہو رہی ہے...`);
-              }
-              continue;
-            }
-
-            lastError = formatGeminiError(res.status, res.data);
-            break;
+            const errorMsg = formatGeminiError(res.status, res.data);
+            setStatusMessage(errorMsg);
+            setResultText('Image analysis failed.');
+          } catch (reqErr: any) {
+            setStatusMessage(`Error: ${reqErr.message || 'Image analysis failed.'}`);
+            setResultText('Image analysis failed.');
           }
-
-          setStatusMessage(lastError || 'تصویر کا تجزیہ ناکام ہو گیا۔');
           setResultText('Image analysis failed.');
         } catch (err: any) {
           setStatusMessage(`تصویر پڑھنے میں خرابی: ${err?.message || 'Error'}`);
@@ -575,15 +541,15 @@ ${sourceText}`;
               generationConfig: { temperature: 0.3 },
             };
 
-            const candidateModels = getCandidateModels();
-            const res = await sendGeminiRequest(candidateModels[0], requestBody);
+            const res = await sendGeminiRequest(DEFAULT_MODEL_ID, requestBody);
             if (res.ok && res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
               const translated = res.data.candidates[0].content.parts[0].text;
               setResultText(translated);
               saveToHistory(`[File: ${file.name}]`, translated, sourceLang, targetLang);
-              setStatusMessage(`تجزیہ مکمل ہو گیا: ${file.name}`);
+              setStatusMessage(`تجزیہ مکمل ہو گیا (ماڈل: ${DEFAULT_MODEL_ID} استعمال ہوا)۔`);
             } else {
-              setStatusMessage('فائل تجزیہ ناکام ہو گیا۔');
+              const errorMsg = formatGeminiError(res.status, res.data);
+              setStatusMessage(errorMsg);
             }
           } catch (err: any) {
             setStatusMessage(`فائل ایرر: ${err?.message}`);
@@ -611,33 +577,60 @@ ${sourceText}`;
   };
 
   const triggerSpeech = (text: string, lang: string) => {
-    if (!('speechSynthesis' in window)) return;
-    const utterance = new SpeechSynthesisUtterance(text);
-    const langMap: Record<string, string> = {
-      'Urdu': 'ur-PK',
-      'Punjabi': 'pa-PK',
-      'Hindi': 'hi-IN',
-      'Arabic': 'ar-SA',
-      'French': 'fr-FR',
-      'Spanish': 'es-ES',
-      'English': 'en-US',
-    };
-    utterance.lang = langMap[lang] || 'en-US';
-    utterance.rate = sprayRate;
-    utterance.pitch = sprayPitch;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+    speakText(text, lang, {
+      rate: sprayRate,
+      pitch: sprayPitch,
+      onStart: () => {
+        setIsPlayingAudio(true);
+        setStatusMessage(`آواز چلائی جا رہی ہے... (${lang}) 🔊`);
+      },
+      onEnd: () => {
+        setIsPlayingAudio(false);
+        setStatusMessage('آواز مکمل ہو گئی۔ (Playback finished)');
+      },
+      onError: (errMsg: string) => {
+        setIsPlayingAudio(false);
+        setStatusMessage(errMsg);
+      },
+    });
   };
 
   const handleListen = () => {
-    if (!('speechSynthesis' in window)) {
-      setStatusMessage('Text-to-speech is not supported in this browser.');
+    // If currently playing, tapping Listen stops the audio
+    if (isPlayingAudio || isSpeaking()) {
+      stopSpeaking();
+      setIsPlayingAudio(false);
+      setStatusMessage('آواز روک دی گئی۔ (Audio stopped)');
       return;
     }
-    if (!resultText || resultText === 'Translation will appear here…') return;
 
-    triggerSpeech(resultText, targetLang);
-    setStatusMessage('آواز چلائی جا رہی ہے... (Speech playback)');
+    // Stop mic if listening
+    if (isListening) {
+      if (recognitionControllerRef.current) {
+        try {
+          recognitionControllerRef.current.stop();
+        } catch (e) {}
+        recognitionControllerRef.current = null;
+      }
+      setIsListening(false);
+    }
+
+    const hasResult =
+      resultText &&
+      resultText !== 'Translation will appear here…' &&
+      resultText !== 'Translating...' &&
+      resultText !== 'Translation failed.' &&
+      resultText.trim().length > 0;
+
+    const hasSource = sourceText && sourceText.trim().length > 0;
+
+    if (hasResult) {
+      triggerSpeech(resultText, targetLang);
+    } else if (hasSource) {
+      triggerSpeech(sourceText, sourceLang);
+    } else {
+      setStatusMessage('پہلے متن لکھیں یا ترجمہ کریں تاکہ آواز سنی جا سکے۔ (Please enter text or translate first)');
+    }
   };
 
   const handleShare = async () => {
@@ -669,6 +662,7 @@ ${sourceText}`;
         .logo{width:48px;height:48px;flex:0 0 48px;border-radius:14px;background:linear-gradient(145deg,#a4e2b7,#16845d);display:grid;place-items:center;color:white;font-weight:800;font-size:20px;box-shadow:inset 0 0 0 2px #ffffff65}
         .brand{min-width:0;flex:1}.brand strong{display:block;font-size:17px;line-height:1.2}.brand small{display:block;font-size:11px;color:var(--muted);margin-top:3px}
         .iconbtn{border:1px solid var(--edge);background:var(--card);color:var(--ink);border-radius:12px;min-width:42px;min-height:42px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:8px;box-shadow:var(--shadow)}
+        .iconbtn.active{border-color:var(--green);background:#168f7020;color:var(--green)}
         .iconbtn svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
         header .iconbtn{border:0;background:transparent;box-shadow:none}
         main{padding:15px}
@@ -840,7 +834,13 @@ ${sourceText}`;
             <div className="resulthead">
               <strong>Translation result</strong>
               <div className="resulttools">
-                <button className="iconbtn" id="listen" onClick={handleListen} title="Listen to result" aria-label="Listen">
+                <button 
+                  className={`iconbtn ${isPlayingAudio ? 'active' : ''}`} 
+                  id="listen" 
+                  onClick={handleListen} 
+                  title={isPlayingAudio ? "Stop audio" : "Listen to result"} 
+                  aria-label="Listen"
+                >
                   <svg viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6l-5 4H4Z"/><path d="M17 9a5 5 0 0 1 0 6m3-9a9 9 0 0 1 0 12"/></svg>
                 </button>
                 <button className="iconbtn" id="copy" onClick={handleCopy} title="Copy result" aria-label="Copy">
@@ -1028,7 +1028,7 @@ ${sourceText}`;
               <label className="label">Gemini AI Model</label>
               <div className="model-list" id="models">
                 <button className="active">
-                  Gemini 1.5 Flash (خودکار فال بیک: 2.0 Flash)
+                  {DEFAULT_MODEL_ID} — fast
                 </button>
               </div>
 
@@ -1214,7 +1214,7 @@ ${sourceText}`;
                   ⚡ کوٹہ (429) یا ماڈل ایرر
                 </strong>
                 <p className="note" style={{ margin: 0 }}>
-                  اگر ماڈل 1.5 کا کوٹا ختم ہو تو سسٹم خودکار 2.0 Flash سے ترجمہ کر دیتا ہے۔
+                  ترجمے اور تصویر کے تجزیے کے لیے تصدیق شدہ تیز ترین ماڈل {DEFAULT_MODEL_ID} استعمال ہوتا ہے۔
                 </p>
               </div>
             </div>

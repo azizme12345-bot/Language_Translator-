@@ -6,10 +6,7 @@ import { defineConfig, type Plugin } from 'vite';
 
 dotenv.config();
 
-export const GEMINI_MODELS = {
-  PRIMARY: 'gemini-1.5-flash',
-  FALLBACK: 'gemini-2.0-flash',
-} as const;
+export const MODEL_ID = 'gemini-3.8-flash';
 
 function devApiPlugin(): Plugin {
   return {
@@ -34,7 +31,7 @@ function devApiPlugin(): Plugin {
               }
 
               if (url.pathname === '/api/translate') {
-                const { text, sourceLang, targetLang, model = GEMINI_MODELS.PRIMARY } = body;
+                const { text, sourceLang, targetLang } = body;
                 if (!text || !targetLang) {
                   res.statusCode = 400;
                   res.setHeader('Content-Type', 'application/json');
@@ -47,9 +44,7 @@ Preserve paragraph breaks, punctuation, formatting, and original meaning. Do not
 Text to translate:
 ${text}`;
 
-                const allowedModels = [GEMINI_MODELS.PRIMARY, GEMINI_MODELS.FALLBACK, 'gemini-3.8-flash'];
-                const modelName = allowedModels.includes(model) ? model : GEMINI_MODELS.PRIMARY;
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent?key=${apiKey}`;
 
                 const geminiRes = await fetch(apiUrl, {
                   method: 'POST',
@@ -65,7 +60,7 @@ ${text}`;
                   res.statusCode = geminiRes.status;
                   res.setHeader('Content-Type', 'application/json');
                   const errorMsg = geminiRes.status === 404
-                    ? 'ماڈل ID درست نہیں ہے یا یہ ماڈل دستیاب نہیں ہے۔ (Model Not Found - 404)'
+                    ? `ماڈل ID (${MODEL_ID}) درست نہیں ہے یا یہ ماڈل دستیاب نہیں ہے۔ (Model Not Found - 404)`
                     : data?.error?.message || 'Translation failed';
                   return res.end(JSON.stringify({ error: errorMsg }));
                 }
@@ -77,7 +72,7 @@ ${text}`;
               }
 
               if (url.pathname === '/api/analyze-image') {
-                const { image, mimeType, targetLang = 'English', model = GEMINI_MODELS.PRIMARY } = body;
+                const { image, mimeType, targetLang = 'English' } = body;
                 if (!image) {
                   res.statusCode = 400;
                   res.setHeader('Content-Type', 'application/json');
@@ -86,9 +81,7 @@ ${text}`;
 
                 const prompt = `Analyze this image, extract any readable text present in it, and translate that extracted text into "${targetLang}". If there is no text in the image, provide a concise description of the image content translated into "${targetLang}". Output ONLY the translation or description without conversational commentary.`;
 
-                const allowedModels = [GEMINI_MODELS.PRIMARY, GEMINI_MODELS.FALLBACK, 'gemini-3.8-flash'];
-                const modelName = allowedModels.includes(model) ? model : GEMINI_MODELS.PRIMARY;
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent?key=${apiKey}`;
 
                 const geminiRes = await fetch(apiUrl, {
                   method: 'POST',

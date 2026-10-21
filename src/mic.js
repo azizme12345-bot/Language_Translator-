@@ -9,10 +9,14 @@ export function isSpeechSupported() {
 }
 
 export function startSpeechRecognition(language, callbacks = {}) {
+  if (typeof window === 'undefined') return null;
+
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   if (!SpeechRec) {
-    callbacks.onError?.('آپ کے براؤزر میں مائیکروفون (Speech Recognition) کی سہولت موجود نہیں ہے۔ برائے کرم Android پر Google Chrome استعمال کریں۔');
+    callbacks.onError?.(
+      'آپ کے براؤزر میں مائیکروفون (Speech Recognition) کی سہولت موجود نہیں ہے۔ برائے کرم Android یا PC پر Google Chrome استعمال کریں۔'
+    );
     return null;
   }
 
@@ -29,23 +33,35 @@ export function startSpeechRecognition(language, callbacks = {}) {
   try {
     const recognition = new SpeechRec();
     recognition.lang = langMap[language] || 'en-US';
-    recognition.interimResults = false;
+    recognition.interimResults = true;
     recognition.maxAlternatives = 1;
-    recognition.continuous = false;
+    recognition.continuous = true;
 
     let hasReceivedResult = false;
+    let isStoppedManually = false;
 
     recognition.onstart = () => {
       callbacks.onStart?.();
     };
 
     recognition.onresult = (event) => {
-      hasReceivedResult = true;
-      const transcript = event.results?.[0]?.[0]?.transcript;
-      if (transcript && transcript.trim()) {
-        callbacks.onResult?.(transcript.trim());
-      } else {
-        callbacks.onError?.('کوئی واضح آواز نہیں پکڑی گئی۔ براہِ کرم دوبارہ بولیے۔');
+      let finalTranscript = '';
+      let interimTranscript = '';
+
+      for (let i = 0; i < event.results.length; ++i) {
+        const item = event.results[i];
+        if (item.isFinal) {
+          finalTranscript += item[0].transcript;
+        } else {
+          interimTranscript += item[0].transcript;
+        }
+      }
+
+      const combined = (finalTranscript + (interimTranscript ? (finalTranscript ? ' ' : '') + interimTranscript : '')).trim();
+
+      if (combined) {
+        hasReceivedResult = true;
+        callbacks.onResult?.(combined, Boolean(finalTranscript));
       }
     };
 
@@ -54,13 +70,13 @@ export function startSpeechRecognition(language, callbacks = {}) {
       if (err === 'not-allowed' || err === 'permission-denied') {
         callbacks.onError?.('مائیکروفون کی اجازت مسترد ہوئی۔ براہِ کرم براؤزر کی سیٹنگز میں مائیک کی اجازت (Allow) دیں۔');
       } else if (err === 'no-speech') {
-        if (!hasReceivedResult) {
+        if (!hasReceivedResult && !isStoppedManually) {
           callbacks.onError?.('کوئی آواز نہیں سنی گئی۔ براہِ کرم مائیک کا بٹن دبا کر واضح آواز میں بولیں۔');
         }
       } else if (err === 'network') {
-        callbacks.onError?.('انٹرنیٹ یا اسپیچ سروس کا کنکشن مسئلہ ہے۔ انٹرنیٹ چیک کریں۔');
+        callbacks.onError?.('اسپیچ سروس کے لیے انٹرنیٹ درکار ہے۔ انٹرنیٹ کنکشن چیک کریں۔');
       } else if (err === 'audio-capture') {
-        callbacks.onError?.('مائیکروفون دستیاب نہیں ہے یا استعمال میں ہے۔');
+        callbacks.onError?.('مائیکروفون دستیاب نہیں ہے یا کسی اور ایپلیکیشن میں استعمال ہو رہا ہے۔');
       } else if (err === 'aborted') {
         // Recognition aborted
       } else {
@@ -76,9 +92,14 @@ export function startSpeechRecognition(language, callbacks = {}) {
 
     return {
       stop: () => {
+        isStoppedManually = true;
         try {
           recognition.stop();
-        } catch (e) {}
+        } catch (e) {
+          try {
+            recognition.abort();
+          } catch (e2) {}
+        }
       },
     };
   } catch (err) {
